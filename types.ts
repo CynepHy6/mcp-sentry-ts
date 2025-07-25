@@ -247,6 +247,7 @@ export interface EventDetailsResponse {
       value: string;
     }>;
     type: string;
+    stacktrace?: SentryStackTrace;
     user: {
       data: Record<string, any>;
       email: string;
@@ -270,7 +271,7 @@ export interface SentryTeam {
   isMember: boolean;
   teamRole: string;
   flags: {
-    'idp:provisioned': boolean;
+    "idp:provisioned": boolean;
   };
   access: string[];
   hasAccess: boolean;
@@ -359,8 +360,8 @@ export interface SentryIssueDetailsResponse {
   shareId: string | null;
   shortId: string;
   stats: {
-    '24h': [number, number][];
-    '30d': [number, number][];
+    "24h": [number, number][];
+    "30d": [number, number][];
   };
   status: string;
   statusDetails: Record<string, any>;
@@ -495,7 +496,11 @@ export interface SentryEventDetailedResponse {
     data?: Record<string, any>;
     id?: string;
   };
-  entries: (SentryExceptionEntry | SentryBreadcrumbsEntry | SentryRequestEntry)[];
+  entries: (
+    | SentryExceptionEntry
+    | SentryBreadcrumbsEntry
+    | SentryRequestEntry
+  )[];
   packages: Record<string, any>;
   sdk: {
     version: string;

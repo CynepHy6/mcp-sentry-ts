@@ -33,7 +33,8 @@ To use this MCP server with Claude, add the following configuration to your Clau
             "command": "npx",
             "args": ["ts-node", "/Users/<your-user-directory>/mcp-sentry-ts/index.ts"],
             "env": {
-                "SENTRY_AUTH": "<YOUR_AUTH_TOKEN>"
+                "SENTRY_AUTH": "<YOUR_AUTH_TOKEN>",
+                "SENTRY_HOST": "https://sentry.io"
             }
         }
     }
@@ -42,6 +43,7 @@ To use this MCP server with Claude, add the following configuration to your Clau
 
 * Update with your directory path in the `args` field.
 * Replace `<YOUR_AUTH_TOKEN>` with your Sentry authentication token.
+* Optionally replace `SENTRY_HOST` with your custom Sentry host URL (defaults to https://sentry.io).
 
 ## Available Tools
 
@@ -147,6 +149,13 @@ Lists replays from a specific Sentry organization.
 ```
 npx ts-node index.ts
 ```
+
+## Environment Variables
+
+This tool requires the following environment variables:
+
+- `SENTRY_AUTH` (required): Your Sentry authentication token with appropriate permissions to access the Sentry API. You can generate a token in your Sentry account settings under "API Keys".
+- `SENTRY_HOST` (optional): The Sentry host URL. Defaults to `https://sentry.io`. Set this if you're using a self-hosted Sentry instance or Sentry Enterprise.
 
 ## Authentication
 

@@ -2,19 +2,18 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
 import fetch from "node-fetch";
+import { z } from "zod";
 import {
-  SentryProject,
-  ShortIdResolutionResponse,
   EventDetailsResponse,
-  SentryProjectCreationResponse,
   SentryClientKey,
   SentryErrorEvent,
-  SentryProjectIssue,
   SentryIssueDetailsResponse,
-  SentryReplay,
+  SentryProject,
+  SentryProjectCreationResponse,
+  SentryProjectIssue,
   SentrySetupResponse,
+  ShortIdResolutionResponse,
 } from "./types";
 
 const SENTRY_AUTH = process.env.SENTRY_AUTH;
@@ -22,6 +21,18 @@ if (!SENTRY_AUTH) {
   console.error("Error: SENTRY_AUTH environment variable is required");
   process.exit(1);
 }
+
+// Add protocol if not specified
+const PROTOCOL = process.env.PROTOCOL || "https";
+let sentryHost = process.env.SENTRY_HOST || "sentry.io";
+if (
+  sentryHost &&
+  !sentryHost.startsWith("http://") &&
+  !sentryHost.startsWith("https://")
+) {
+  sentryHost = `${PROTOCOL}://${sentryHost}`;
+}
+const SENTRY_HOST = sentryHost;
 
 const server = new McpServer({
   name: "Sentry",
@@ -53,10 +64,9 @@ server.tool(
     view: "summary" | "detailed";
     format: "plain" | "markdown";
   }) => {
-
     try {
-      // Add breadcrumb for API call      
-      const apiUrl: string = `https://sentry.io/api/0/organizations/${organization_slug}/projects/`;
+      // Add breadcrumb for API call
+      const apiUrl: string = `${SENTRY_HOST}/api/0/organizations/${organization_slug}/projects/`;
 
       // Make the API request
       const response = await fetch(apiUrl, {
@@ -212,7 +222,7 @@ server.tool(
       console.error("DEBUG: Format:", format);
 
       // Construct the URL for the Sentry API
-      const apiUrl: string = `https://sentry.io/api/0/organizations/${organization_slug}/shortids/${short_id}/`;
+      const apiUrl: string = `${SENTRY_HOST}/api/0/organizations/${organization_slug}/shortids/${short_id}/`;
 
       // Make the API request
       const response = await fetch(apiUrl, {
@@ -363,25 +373,29 @@ server.tool(
       // Extract organization slug from the issue URL if provided
       let organizationSlug = "";
 
-      if (issue_id_or_url.includes("sentry.io")) {
+      if (issue_id_or_url.startsWith("http")) {
         // Parse the URL to extract organization slug
         const urlParts = issue_id_or_url.split("/");
-        const orgIndex = urlParts.indexOf("sentry.io") + 1;
-        if (orgIndex < urlParts.length) {
-          organizationSlug = urlParts[orgIndex];
+        const hostWithProtocol = `${urlParts[0]}//${urlParts[2]}`;
+        if (hostWithProtocol === SENTRY_HOST) {
+          const orgIndex = 3;
+          if (orgIndex < urlParts.length) {
+            organizationSlug = urlParts[orgIndex];
+          }
+        } else {
+          organizationSlug = organization_slug;
         }
       } else {
-        // If not a URL, assume it's just the organization slug
-        // We need to determine the organization from environment variables or other means
-      
         organizationSlug = organization_slug;
       }
 
       console.error("DEBUG: Organization slug:", organizationSlug);
       console.error("DEBUG: Issue ID:", issue_id_or_url);
+      console.error("DEBUG: SENTRY_HOST:", SENTRY_HOST);
 
       // Construct the URL for the Sentry API
-      const apiUrl: string = `https://sentry.io/api/0/organizations/${organizationSlug}/eventids/${event_id}/`;
+      const apiUrl: string = `${SENTRY_HOST}/api/0/organizations/${organizationSlug}/eventids/${event_id}/`;
+      console.error("DEBUG: Final API URL:", apiUrl);
 
       // Make the API request
       const response = await fetch(apiUrl, {
@@ -409,7 +423,6 @@ server.tool(
 
       // Parse the response
       const data: EventDetailsResponse = await response.json();
-      console.error("DEBUG: Event data:", JSON.stringify(data, null, 2));
 
       // Format the output based on the view type and format
       let output: string = "";
@@ -418,77 +431,168 @@ server.tool(
         output = `# Event Details: ${data.event.eventID}\n\n`;
 
         if (view === "detailed") {
-          // Event information section
-          output += `## Event Information\n\n`;
+          // Essential error information
+          output += `## Error Overview\n\n`;
           output += `- **Title**: ${
             data.event.title || data.event.metadata.title
           }\n`;
           output += `- **Platform**: ${data.event.platform}\n`;
-          output += `- **Date Created**: ${data.event.dateCreated}\n`;
-          output += `- **Date Received**: ${data.event.dateReceived}\n`;
-          output += `- **Size**: ${data.event.size} bytes\n`;
-          output += `- **Type**: ${data.event.type}\n`;
+          output += `- **Date**: ${data.event.dateCreated}\n`;
 
-          // Tags section
+          // Essential tags only
           if (data.event.tags && data.event.tags.length > 0) {
-            output += `\n## Tags\n\n`;
+            output += `\n## Environment\n\n`;
+            const importantTags = [
+              "environment",
+              "level",
+              "release",
+              "server_name",
+              "runtime",
+            ];
             for (const tag of data.event.tags) {
-              output += `- **${tag.key}**: ${tag.value}\n`;
-            }
-          }
-
-          // User information section
-          if (data.event.user) {
-            output += `\n## User Information\n\n`;
-            output += `- **ID**: ${data.event.user.id}\n`;
-            if (data.event.user.name)
-              output += `- **Name**: ${data.event.user.name}\n`;
-            if (data.event.user.email)
-              output += `- **Email**: ${data.event.user.email}\n`;
-            if (data.event.user.username)
-              output += `- **Username**: ${data.event.user.username}\n`;
-            if (data.event.user.ip_address)
-              output += `- **IP Address**: ${data.event.user.ip_address}\n`;
-          }
-
-          // Request information section
-          const requestEntry = data.event.entries.find(
-            (entry) => entry.type === "request"
-          );
-          if (requestEntry) {
-            output += `\n## Request Information\n\n`;
-            if (requestEntry.data.url)
-              output += `- **URL**: ${requestEntry.data.url}\n`;
-            if (requestEntry.data.method)
-              output += `- **Method**: ${requestEntry.data.method}\n`;
-
-            if (
-              requestEntry.data.headers &&
-              requestEntry.data.headers.length > 0
-            ) {
-              output += `\n### Headers\n\n`;
-              for (const [key, value] of requestEntry.data.headers) {
-                output += `- **${key}**: ${value}\n`;
+              if (
+                importantTags.includes((tag as any).key) &&
+                (tag as any).value !== "undefined"
+              ) {
+                output += `- **${(tag as any).key}**: ${(tag as any).value}\n`;
               }
             }
           }
 
-          // Context information
+          // User information (only if relevant)
+          if (
+            data.event.user &&
+            (data.event.user.id || data.event.user.email)
+          ) {
+            output += `\n## User Context\n\n`;
+            if (data.event.user.id)
+              output += `- **User ID**: ${data.event.user.id}\n`;
+            if (data.event.user.email)
+              output += `- **Email**: ${data.event.user.email}\n`;
+          }
+
+          // Stack trace section (check exception entries, stacktrace entries, and top-level stacktrace)
+          const exceptionEntry = data.event.entries.find(
+            (entry: any) => entry.type === "exception"
+          );
+          const stacktraceEntry = data.event.entries.find(
+            (entry: any) => entry.type === "stacktrace"
+          );
+
+          let hasStackTrace = false;
+
+          // Check for exception entry with stacktrace
+          if (exceptionEntry && exceptionEntry.data.values) {
+            output += `\n## Exception Details\n\n`;
+
+            for (let i = 0; i < exceptionEntry.data.values.length; i++) {
+              const exception = exceptionEntry.data.values[i];
+              output += `### Exception ${i + 1}: ${exception.type}\n\n`;
+              output += `- **Message**: ${exception.value}\n`;
+              if (exception.module) {
+                output += `- **Module**: ${exception.module}\n`;
+              }
+              if (exception.mechanism) {
+                output += `- **Handled**: ${exception.mechanism.handled}\n`;
+                output += `- **Type**: ${exception.mechanism.type}\n`;
+              }
+
+              // Stack trace from exception
+              if (exception.stacktrace && exception.stacktrace.frames) {
+                hasStackTrace = true;
+                output += `\n#### Stack Trace\n\n`;
+                output += `| Function | File | Line | In App |\n`;
+                output += `|----------|------|------|--------|\n`;
+
+                for (const frame of exception.stacktrace.frames.reverse()) {
+                  const func = frame.function || "N/A";
+                  const filename = frame.filename || frame.absPath || "N/A";
+                  const line = frame.lineNo || "N/A";
+                  const inApp = frame.inApp ? "Yes" : "No";
+                  output += `| ${func} | ${filename} | ${line} | ${inApp} |\n`;
+                }
+              }
+              output += `\n`;
+            }
+          }
+
+          // Check for stacktrace entry if no exception stacktrace found
+          if (
+            !hasStackTrace &&
+            stacktraceEntry &&
+            stacktraceEntry.data.frames
+          ) {
+            hasStackTrace = true;
+            output += `\n## Stack Trace\n\n`;
+            output += `| Function | File | Line | In App |\n`;
+            output += `|----------|------|------|--------|\n`;
+
+            for (const frame of stacktraceEntry.data.frames.reverse()) {
+              const func = frame.function || "N/A";
+              const filename = frame.filename || frame.absPath || "N/A";
+              const line = frame.lineNo || "N/A";
+              const inApp = frame.inApp ? "Yes" : "No";
+              output += `| ${func} | ${filename} | ${line} | ${inApp} |\n`;
+            }
+          }
+
+          // Check for top-level stacktrace if no other stacktrace found
+          if (
+            !hasStackTrace &&
+            data.event.stacktrace &&
+            data.event.stacktrace.frames
+          ) {
+            output += `\n## Stack Trace\n\n`;
+            output += `| Function | File | Line | In App |\n`;
+            output += `|----------|------|------|--------|\n`;
+
+            for (const frame of data.event.stacktrace.frames.reverse()) {
+              const func = frame.function || "N/A";
+              const filename = frame.filename || frame.absPath || "N/A";
+              const line = frame.lineNo || "N/A";
+              const inApp = frame.inApp ? "Yes" : "No";
+              output += `| ${func} | ${filename} | ${line} | ${inApp} |\n`;
+            }
+          }
+
+          // Request information (essential only)
+          const requestEntry = data.event.entries.find(
+            (entry: any) => entry.type === "request"
+          );
+          if (
+            requestEntry &&
+            (requestEntry.data.url || requestEntry.data.method)
+          ) {
+            output += `\n## Request Context\n\n`;
+            if (requestEntry.data.url)
+              output += `- **URL**: ${requestEntry.data.url}\n`;
+            if (requestEntry.data.method)
+              output += `- **Method**: ${requestEntry.data.method}\n`;
+          }
+
+          // Context information (essential fields only)
           if (
             data.event.context &&
             Object.keys(data.event.context).length > 0
           ) {
-            output += `\n## Context\n\n`;
-            output += "```json\n";
-            output += JSON.stringify(data.event.context, null, 2);
-            output += "\n```\n";
-          }
+            output += `\n## Additional Context\n\n`;
 
-          // Project information section
-          output += `\n## Project Information\n\n`;
-          output += `- **Organization**: ${data.organizationSlug}\n`;
-          output += `- **Project**: ${data.projectSlug}\n`;
-          output += `- **Group ID**: ${data.groupId}\n`;
+            // Show only important context fields
+            const importantFields = ["message", "body", "command", "env"];
+            const filteredContext: any = {};
+
+            for (const key of importantFields) {
+              if (data.event.context[key]) {
+                filteredContext[key] = data.event.context[key];
+              }
+            }
+
+            if (Object.keys(filteredContext).length > 0) {
+              output += "```json\n";
+              output += JSON.stringify(filteredContext, null, 2);
+              output += "\n```\n";
+            }
+          }
         } else {
           // Summary view
           output += `## Summary\n\n`;
@@ -536,7 +640,7 @@ server.tool(
             output += `\nTags:\n\n`;
 
             for (const tag of data.event.tags) {
-              output += `${tag.key}: ${tag.value}\n`;
+              output += `${(tag as any).key}: ${(tag as any).value}\n`;
             }
           }
 
@@ -554,9 +658,83 @@ server.tool(
               output += `IP Address: ${data.event.user.ip_address}\n`;
           }
 
+          // Stack trace section (check exception entries, stacktrace entries, and top-level stacktrace)
+          const exceptionEntryPlain = data.event.entries.find(
+            (entry: any) => entry.type === "exception"
+          );
+          const stacktraceEntryPlain = data.event.entries.find(
+            (entry: any) => entry.type === "stacktrace"
+          );
+
+          let hasStackTracePlain = false;
+
+          // Check for exception entry with stacktrace
+          if (exceptionEntryPlain && exceptionEntryPlain.data.values) {
+            output += `\nException Details:\n\n`;
+
+            for (let i = 0; i < exceptionEntryPlain.data.values.length; i++) {
+              const exception = exceptionEntryPlain.data.values[i];
+              output += `Exception ${i + 1}: ${exception.type}\n`;
+              output += `Message: ${exception.value}\n`;
+              if (exception.module) {
+                output += `Module: ${exception.module}\n`;
+              }
+              if (exception.mechanism) {
+                output += `Handled: ${exception.mechanism.handled}\n`;
+                output += `Type: ${exception.mechanism.type}\n`;
+              }
+
+              // Stack trace from exception
+              if (exception.stacktrace && exception.stacktrace.frames) {
+                hasStackTracePlain = true;
+                output += `\nStack Trace:\n\n`;
+
+                for (const frame of exception.stacktrace.frames.reverse()) {
+                  const func = frame.function || "N/A";
+                  const filename = frame.filename || frame.absPath || "N/A";
+                  const line = frame.lineNo || "N/A";
+                  const inApp = frame.inApp ? "Yes" : "No";
+                  output += `${func} at ${filename}:${line} (In App: ${inApp})\n`;
+                }
+              }
+              output += `\n`;
+            }
+          }
+
+          // Check for stacktrace entry if no exception stacktrace found
+          if (!hasStackTracePlain && stacktraceEntryPlain && stacktraceEntryPlain.data.frames) {
+            hasStackTracePlain = true;
+            output += `\nStack Trace:\n\n`;
+
+            for (const frame of stacktraceEntryPlain.data.frames.reverse()) {
+              const func = frame.function || "N/A";
+              const filename = frame.filename || frame.absPath || "N/A";
+              const line = frame.lineNo || "N/A";
+              const inApp = frame.inApp ? "Yes" : "No";
+              output += `${func} at ${filename}:${line} (In App: ${inApp})\n`;
+            }
+          }
+
+          // Check for top-level stacktrace if no other stacktrace found
+          if (
+            !hasStackTracePlain &&
+            data.event.stacktrace &&
+            data.event.stacktrace.frames
+          ) {
+            output += `\nStack Trace:\n\n`;
+
+            for (const frame of data.event.stacktrace.frames.reverse()) {
+              const func = frame.function || "N/A";
+              const filename = frame.filename || frame.absPath || "N/A";
+              const line = frame.lineNo || "N/A";
+              const inApp = frame.inApp ? "Yes" : "No";
+              output += `${func} at ${filename}:${line} (In App: ${inApp})\n`;
+            }
+          }
+
           // Request information section
           const requestEntry = data.event.entries.find(
-            (entry) => entry.type === "request"
+            (entry: any) => entry.type === "request"
           );
           if (requestEntry) {
             output += `\nRequest Information:\n\n`;
@@ -680,7 +858,7 @@ server.tool(
       console.error("DEBUG: Format:", format);
 
       // Construct the URL for the Sentry API
-      const apiUrl: string = `https://sentry.io/api/0/projects/${organization_slug}/${project_slug}/events/`;
+      const apiUrl: string = `${SENTRY_HOST}/api/0/projects/${organization_slug}/${project_slug}/events/`;
 
       // Make the API request
       const response = await fetch(apiUrl, {
@@ -932,7 +1110,7 @@ server.tool(
       console.error("DEBUG: Format:", format);
 
       // Construct the URL for the Sentry API to create a project
-      const apiUrl: string = `https://sentry.io/api/0/teams/${organization_slug}/${team_slug}/projects/`;
+      const apiUrl: string = `${SENTRY_HOST}/api/0/teams/${organization_slug}/${team_slug}/projects/`;
 
       // Prepare the request body
       const requestBody: any = {
@@ -977,7 +1155,7 @@ server.tool(
       );
 
       // Now fetch the client keys for the newly created project
-      const keysApiUrl: string = `https://sentry.io/api/0/projects/${organization_slug}/${projectData.slug}/keys/`;
+      const keysApiUrl: string = `${SENTRY_HOST}/api/0/projects/${organization_slug}/${projectData.slug}/keys/`;
 
       // Make the API request to get client keys
       const keysResponse = await fetch(keysApiUrl, {
@@ -1208,7 +1386,7 @@ server.tool(
       console.error("DEBUG: Format:", format);
 
       // Construct the URL for the Sentry API
-      const apiUrl: string = `https://sentry.io/api/0/projects/${organization_slug}/${project_slug}/issues/`;
+      const apiUrl: string = `${SENTRY_HOST}/api/0/projects/${organization_slug}/${project_slug}/issues/`;
 
       // Make the API request
       const response = await fetch(apiUrl, {
@@ -1435,7 +1613,7 @@ server.tool(
       console.error("DEBUG: Format:", format);
 
       // Construct the URL for the Sentry API
-      const apiUrl: string = `https://sentry.io/api/0/organizations/${organization_slug}/issues/${issue_id}/events/`;
+      const apiUrl: string = `${SENTRY_HOST}/api/0/organizations/${organization_slug}/issues/${issue_id}/events/`;
 
       // Make the API request
       const response = await fetch(apiUrl, {
@@ -1695,16 +1873,26 @@ server.tool(
       let organizationSlug = "";
 
       if (issue_id_or_url.startsWith("http")) {
-        // Extract organization slug and issue ID from URL
-        const urlPattern =
-          /https:\/\/([\w-]+)\.sentry\.io\/(?:organizations\/)?([\w-]+)?(?:\/)?(?:issues\/)?(\d+)/;
-        const match = issue_id_or_url.match(urlPattern);
+        // Parse the URL to extract organization slug and issue ID
+        try {
+          const url = new URL(issue_id_or_url);
+          const pathParts = url.pathname.split("/").filter((part) => part);
 
-        if (!match) {
+          // URL structure: /organizations/{org}/issues/{issue_id}
+          if (
+            pathParts.length >= 3 &&
+            pathParts[0] === "organizations" &&
+            pathParts[2] === "issues"
+          ) {
+            organizationSlug = pathParts[1];
+            issue_id_or_url = pathParts[3];
+          } else {
+            // Fallback to provided organization_slug
+            organizationSlug = organization_slug;
+          }
+        } catch (e) {
+          console.error("DEBUG: URL parsing failed:", e);
           organizationSlug = organization_slug;
-        } else {
-          organizationSlug = match[1];
-          issue_id_or_url = match[3];
         }
       } else {
         organizationSlug = organization_slug;
@@ -1712,9 +1900,11 @@ server.tool(
 
       console.error("DEBUG: Organization slug:", organizationSlug);
       console.error("DEBUG: Issue ID:", issue_id_or_url);
+      console.error("DEBUG: SENTRY_HOST:", SENTRY_HOST);
 
       // Construct the URL for the Sentry API
-      const apiUrl: string = `https://sentry.io/api/0/organizations/${organizationSlug}/issues/${issue_id_or_url}/`;
+      const apiUrl: string = `${SENTRY_HOST}/api/0/organizations/${organizationSlug}/issues/${issue_id_or_url}/`;
+      console.error("DEBUG: Final API URL:", apiUrl);
 
       // Make the API request
       const response = await fetch(apiUrl, {
@@ -2168,7 +2358,7 @@ server.tool(
 
       // Build the URL with query parameters
       const queryString = queryParams.toString();
-      const url = `https://sentry.io/api/0/organizations/${organization_slug}/replays/${
+      const url = `${SENTRY_HOST}/api/0/organizations/${organization_slug}/replays/${
         queryString ? `?${queryString}` : ""
       }`;
 
@@ -2579,88 +2769,127 @@ server.tool(
   "setup_sentry",
   "Set up Sentry for a project returning a dsn and instructions for setup.",
   {
-    organization_slug: z.string().describe("The slug of the organization to create the project in"),
-    team_slug: z.string().describe("The slug of the team to associate the project with"),
+    organization_slug: z
+      .string()
+      .describe("The slug of the organization to create the project in"),
+    team_slug: z
+      .string()
+      .describe("The slug of the team to associate the project with"),
     project_name: z.string().describe("The name of the project to create"),
-    environment: z.string().optional().describe("Optional environment name (e.g., production, staging, development)"),
-    format: z.enum(["plain", "markdown"]).default("markdown").describe("Output format (default: markdown)")
+    environment: z
+      .string()
+      .optional()
+      .describe(
+        "Optional environment name (e.g., production, staging, development)"
+      ),
+    format: z
+      .enum(["plain", "markdown"])
+      .default("markdown")
+      .describe("Output format (default: markdown)"),
   },
-  async ({ organization_slug, team_slug, project_name, environment, format }: {
+  async ({
+    organization_slug,
+    team_slug,
+    project_name,
+    environment,
+    format,
+  }: {
     organization_slug: string;
     team_slug: string;
     project_name: string;
     environment?: string;
-    format: "plain" | "markdown"
+    format: "plain" | "markdown";
   }) => {
     try {
       // Debug input
-      console.error('DEBUG: Setting up Sentry for project:', project_name);
-      console.error('DEBUG: In organization:', organization_slug);
-      console.error('DEBUG: For team:', team_slug);
-      console.error('DEBUG: Environment:', environment);
+      console.error("DEBUG: Setting up Sentry for project:", project_name);
+      console.error("DEBUG: In organization:", organization_slug);
+      console.error("DEBUG: For team:", team_slug);
+      console.error("DEBUG: Environment:", environment);
 
       // Step 1: Create the project
-      const createProjectUrl = `https://sentry.io/api/0/teams/${organization_slug}/${team_slug}/projects/`;
-      
+      const createProjectUrl = `${SENTRY_HOST}/api/0/teams/${organization_slug}/${team_slug}/projects/`;
+
       const createProjectResponse = await fetch(createProjectUrl, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Authorization': `Bearer ${SENTRY_AUTH}`,
-          'Content-Type': 'application/json'
+          Authorization: `Bearer ${SENTRY_AUTH}`,
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          name: project_name
-        })
+          name: project_name,
+        }),
       });
 
       if (!createProjectResponse.ok) {
         const errorText = await createProjectResponse.text();
-        console.error('DEBUG: Project creation failed:', createProjectResponse.status, errorText);
+        console.error(
+          "DEBUG: Project creation failed:",
+          createProjectResponse.status,
+          errorText
+        );
         return {
-          content: [{
-            type: "text",
-            text: `Failed to create Sentry project: ${createProjectResponse.status} ${createProjectResponse.statusText}\n${errorText}`
-          }],
-          isError: true
+          content: [
+            {
+              type: "text",
+              text: `Failed to create Sentry project: ${createProjectResponse.status} ${createProjectResponse.statusText}\n${errorText}`,
+            },
+          ],
+          isError: true,
         };
       }
 
-      const projectData: SentryProjectCreationResponse = await createProjectResponse.json();
-      console.error('DEBUG: Project created:', JSON.stringify(projectData, null, 2));
+      const projectData: SentryProjectCreationResponse =
+        await createProjectResponse.json();
+      console.error(
+        "DEBUG: Project created:",
+        JSON.stringify(projectData, null, 2)
+      );
 
       // Step 2: Get the client keys (DSN)
-      const clientKeysUrl = `https://sentry.io/api/0/projects/${organization_slug}/${projectData.slug}/keys/`;
-      
+      const clientKeysUrl = `${SENTRY_HOST}/api/0/projects/${organization_slug}/${projectData.slug}/keys/`;
+
       const clientKeysResponse = await fetch(clientKeysUrl, {
-        method: 'GET',
+        method: "GET",
         headers: {
-          'Authorization': `Bearer ${SENTRY_AUTH}`,
-          'Content-Type': 'application/json'
-        }
+          Authorization: `Bearer ${SENTRY_AUTH}`,
+          "Content-Type": "application/json",
+        },
       });
 
       if (!clientKeysResponse.ok) {
         const errorText = await clientKeysResponse.text();
-        console.error('DEBUG: Client keys fetch failed:', clientKeysResponse.status, errorText);
+        console.error(
+          "DEBUG: Client keys fetch failed:",
+          clientKeysResponse.status,
+          errorText
+        );
         return {
-          content: [{
-            type: "text",
-            text: `Failed to fetch client keys: ${clientKeysResponse.status} ${clientKeysResponse.statusText}\n${errorText}`
-          }],
-          isError: true
+          content: [
+            {
+              type: "text",
+              text: `Failed to fetch client keys: ${clientKeysResponse.status} ${clientKeysResponse.statusText}\n${errorText}`,
+            },
+          ],
+          isError: true,
         };
       }
 
       const clientKeys: SentryClientKey[] = await clientKeysResponse.json();
-      console.error('DEBUG: Client keys fetched:', JSON.stringify(clientKeys, null, 2));
+      console.error(
+        "DEBUG: Client keys fetched:",
+        JSON.stringify(clientKeys, null, 2)
+      );
 
       if (clientKeys.length === 0) {
         return {
-          content: [{
-            type: "text",
-            text: `No client keys found for the project. Please check the project settings.`
-          }],
-          isError: true
+          content: [
+            {
+              type: "text",
+              text: `No client keys found for the project. Please check the project settings.`,
+            },
+          ],
+          isError: true,
         };
       }
 
@@ -2675,17 +2904,17 @@ server.tool(
         installationInstructions: {
           generic: `Sentry.init({
             dsn: "${dsn}",
-            ${environment ? `environment: "${environment}",` : ''}
+            ${environment ? `environment: "${environment}",` : ""}
             // Set tracesSampleRate to 1.0 to capture 100% of transactions for performance monitoring
             tracesSampleRate: 1.0,
-          });`
-        }
+          });`,
+        },
       };
 
       // Format the output
-      let output = '';
+      let output = "";
 
-      if (format === 'markdown') {
+      if (format === "markdown") {
         output = `# Sentry Project Setup: ${setupResponse.projectName}\n\n`;
         output += `## Project Information\n\n`;
         output += `- **Project Name**: ${setupResponse.projectName}\n`;
@@ -2700,7 +2929,7 @@ server.tool(
         output += `1. Choose the appropriate SDK for your platform and follow the installation instructions above.\n`;
         output += `2. Configure additional options as needed for your specific use case.\n`;
         output += `3. Test your integration by triggering a test event.\n`;
-        output += `4. Visit your [Sentry dashboard](https://sentry.io/organizations/${organization_slug}/issues/) to view and manage your errors.\n`;
+        output += `4. Visit your [Sentry dashboard](${SENTRY_HOST}/organizations/${organization_slug}/issues/) to view and manage your errors.\n`;
       } else {
         // Plain text format
         output = `Sentry Project Setup: ${setupResponse.projectName}\n\n`;
@@ -2716,12 +2945,12 @@ server.tool(
         output += `Generic Setup:\n`;
         output += setupResponse.installationInstructions.generic.trim();
         output += "\n\n";
-        
+
         output += `Next Steps:\n`;
         output += `1. Choose the appropriate SDK for your platform and follow the installation instructions above.\n`;
         output += `2. Configure additional options as needed for your specific use case.\n`;
         output += `3. Test your integration by triggering a test event.\n`;
-        output += `4. Visit your Sentry dashboard to view and manage your errors: https://sentry.io/organizations/${organization_slug}/issues/\n`;
+        output += `4. Visit your Sentry dashboard to view and manage your errors: ${SENTRY_HOST}/organizations/${organization_slug}/issues/\n`;
       }
 
       return {
@@ -2753,9 +2982,7 @@ server.tool(
     organization_slug: z
       .string()
       .describe("The slug of the organization in Sentry"),
-    project_slug: z
-      .string()
-      .describe("The slug of the project in Sentry"),
+    project_slug: z.string().describe("The slug of the project in Sentry"),
     file_identifier: z
       .string()
       .describe("The path or name of the file to search for errors in"),
@@ -2793,14 +3020,17 @@ server.tool(
       console.error("DEBUG: Identifier type:", identifier_type);
       console.error("DEBUG: Organization:", organization_slug);
       console.error("DEBUG: Project:", project_slug);
-      
+
       // Construct the query based on identifier type
-      let query = identifier_type === "filepath" 
-        ? `stack.filename:"*${file_identifier}"`
-        : `stack.filename:"*${file_identifier}"`;
-            
+      let query =
+        identifier_type === "filepath"
+          ? `stack.filename:"*${file_identifier}"`
+          : `stack.filename:"*${file_identifier}"`;
+
       // Construct the URL for the Sentry API
-      const apiUrl: string = `https://sentry.io/api/0/projects/${organization_slug}/${project_slug}/issues/?query=${encodeURIComponent(query)}`;
+      const apiUrl: string = `${SENTRY_HOST}/api/0/projects/${organization_slug}/${project_slug}/issues/?query=${encodeURIComponent(
+        query
+      )}`;
 
       // Make the API request
       const response = await fetch(apiUrl, {
@@ -2828,19 +3058,17 @@ server.tool(
 
       // Parse the response
       const issues: SentryProjectIssue[] = await response.json();
-      console.error(
-        "DEBUG: Found issues:",
-        JSON.stringify(issues, null, 2)
-      );
+      console.error("DEBUG: Found issues:", JSON.stringify(issues, null, 2));
 
       // Format the output based on the view type and format
       let output: string = "";
-      
+
       if (issues.length === 0) {
-        output = format === "markdown" 
-          ? `# No issues found\n\nNo errors found for ${identifier_type} \`${file_identifier}\` in project \`${project_slug}\`.`
-          : `No issues found\n\nNo errors found for ${identifier_type} ${file_identifier} in project ${project_slug}.`;
-          
+        output =
+          format === "markdown"
+            ? `# No issues found\n\nNo errors found for ${identifier_type} \`${file_identifier}\` in project \`${project_slug}\`.`
+            : `No issues found\n\nNo errors found for ${identifier_type} ${file_identifier} in project ${project_slug}.`;
+
         return {
           content: [{ type: "text", text: output }],
         };
@@ -2848,7 +3076,7 @@ server.tool(
 
       if (format === "markdown") {
         output = `# Errors in ${identifier_type}: \`${file_identifier}\`\n\n`;
-        
+
         if (view === "detailed") {
           for (const issue of issues) {
             output += `## ${issue.shortId}: ${issue.title}\n\n`;
@@ -2860,7 +3088,7 @@ server.tool(
             output += `- **Users Affected**: ${issue.userCount}\n`;
             output += `- **Culprit**: ${issue.culprit}\n`;
             output += `- **Link**: [View in Sentry](${issue.permalink})\n\n`;
-            
+
             if (issue.metadata && Object.keys(issue.metadata).length > 0) {
               output += `### Metadata\n\n`;
               for (const [key, value] of Object.entries(issue.metadata)) {
@@ -2869,7 +3097,7 @@ server.tool(
               output += `\n`;
             }
           }
-          
+
           // Add summary at the end
           output += `## Summary\n\n`;
           output += `- **Total Issues**: ${issues.length}\n`;
@@ -2879,17 +3107,17 @@ server.tool(
           // Summary view
           output += `| Issue ID | Title | Status | Level | Events | Last Seen |\n`;
           output += `|----------|-------|--------|-------|--------|----------|\n`;
-          
+
           for (const issue of issues) {
             output += `| [${issue.shortId}](${issue.permalink}) | ${issue.title} | ${issue.status} | ${issue.level} | ${issue.count} | ${issue.lastSeen} |\n`;
           }
-          
+
           output += `\n**Total Issues**: ${issues.length}\n`;
         }
       } else {
         // Plain text format
         output = `Errors in ${identifier_type}: ${file_identifier}\n\n`;
-        
+
         if (view === "detailed") {
           for (const issue of issues) {
             output += `${issue.shortId}: ${issue.title}\n`;
@@ -2901,7 +3129,7 @@ server.tool(
             output += `Users Affected: ${issue.userCount}\n`;
             output += `Culprit: ${issue.culprit}\n`;
             output += `Link: ${issue.permalink}\n\n`;
-            
+
             if (issue.metadata && Object.keys(issue.metadata).length > 0) {
               output += `Metadata:\n`;
               for (const [key, value] of Object.entries(issue.metadata)) {
@@ -2910,7 +3138,7 @@ server.tool(
               output += `\n`;
             }
           }
-          
+
           // Add summary at the end
           output += `Summary:\n\n`;
           output += `Total Issues: ${issues.length}\n`;
@@ -2921,7 +3149,7 @@ server.tool(
           for (const issue of issues) {
             output += `${issue.shortId} | ${issue.title} | ${issue.status} | ${issue.level} | ${issue.count} events | ${issue.lastSeen}\n`;
           }
-          
+
           output += `\nTotal Issues: ${issues.length}\n`;
         }
       }
@@ -2935,7 +3163,7 @@ server.tool(
         ],
       };
     } catch (error: any) {
-      console.error("DEBUG: Caught error:", error);      
+      console.error("DEBUG: Caught error:", error);
       return {
         content: [
           {
